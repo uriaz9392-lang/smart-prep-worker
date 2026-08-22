@@ -16,8 +16,13 @@ const SUPABASE_URL = "https://ehkrddewmmilogbojvkh.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_q_gmTPI3dh6wqAqgHDXKpg_wrTkA5ia";
 
 async function refreshLeaderboard(env) {
+  // Added `course` to the select list so the app can filter the leaderboard
+  // down to each student's own course. Requires the `course` column to exist
+  // on user_stats in Supabase (alter table user_stats add column if not
+  // exists course text;) — if it doesn't exist yet, Supabase will just error
+  // on this request the same way it would for any other missing column.
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/user_stats?select=name,total_attempted,total_correct&order=total_correct.desc&limit=50`,
+    `${SUPABASE_URL}/rest/v1/user_stats?select=name,total_attempted,total_correct,course&order=total_correct.desc&limit=50`,
     {
       headers: {
         apikey: SUPABASE_ANON_KEY,
@@ -27,7 +32,14 @@ async function refreshLeaderboard(env) {
   );
   if (!res.ok) throw new Error("Supabase leaderboard fetch failed: " + res.status);
   const rows = await res.json();
-  const cleaned = (rows || []).filter((r) => r.name && r.name.trim());
+  const cleaned = (rows || [])
+    .filter((r) => r.name && r.name.trim())
+    .map((r) => ({
+      name: r.name,
+      total_attempted: r.total_attempted,
+      total_correct: r.total_correct,
+      course: r.course || null,
+    }));
   await env.MCQ_BANK.put("leaderboard", JSON.stringify(cleaned));
   await env.MCQ_BANK.put("leaderboard-updated", String(Date.now()));
   return cleaned;
