@@ -1,9 +1,16 @@
 // Smart Prep — MCQ Bank + Leaderboard + Generic App-Data CDN Worker
 //
-// MCQ bank endpoints (unchanged):
-//   GET  /bank              -> full question bank
+// MCQ bank endpoints:
+//   GET  /bank              -> full question bank (built from Supabase's `questions` table)
 //   GET  /bank-version       -> just the version number
-//   PUT  /bank              -> updates the bank (needs x-admin-key header)
+//   PUT  /bank              -> manual override: directly sets the cached bank (needs
+//                              x-admin-key header) — kept for emergencies, but the app
+//                              itself no longer uses this; it calls /bank/refresh instead
+//                              so the admin's device never has to upload the whole bank.
+//   GET  /bank/refresh       -> pulls every row from Supabase's `questions` table directly
+//                              (server-to-server, not through the admin's connection) and
+//                              rebuilds the cache — this is what the app calls after any
+//                              add/edit/delete/bulk-upload.
 //
 // Leaderboard endpoints (unchanged):
 //   GET  /leaderboard        -> cached leaderboard (top 50), auto-refreshed every 5 minutes
@@ -11,7 +18,7 @@
 //                                useful right after fixing a Supabase policy, so you don't
 //                                have to wait for the next scheduled 5-minute refresh)
 //
-// Generic app-data endpoints (NEW):
+// Generic app-data endpoints:
 //   GET  /data/:name          -> cached value for that resource, or "null" if never cached yet
 //   GET  /data/:name/version  -> { version: n } for that resource
 //   PUT  /data/:name          -> updates the cached value + bumps its version (needs x-admin-key)
@@ -25,6 +32,41 @@
 const ADMIN_KEY = "THpKGBzsM4dtsa9ruyvmlxbD6AzPfMwB-ZOawZmHSqY";
 const SUPABASE_URL = "https://ehkrddewmmilogbojvkh.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_q_gmTPI3dh6wqAqgHDXKpg_wrTkA5ia";
+
+// Pulls every row from the new `questions` table directly from Supabase
+// (Cloudflare's own connection, not the admin's phone) and rebuilds the
+// same "bank" KV entry the existing /bank and /bank-version endpoints
+// already serve — so students see zero change, while the admin's device
+// never has to upload the full multi-MB bank again for an add/edit/delete/
+// bulk-upload. Paginated (1000 rows per request) since the bank is well
+// past PostgREST's default single-request row limit.
+async function refreshBank(env) {
+  const pageSize = 1000;
+  let from = 0;
+  let all = [];
+  while (true) {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/questions?select=id,program,year,block,subject,topic,source,question,options,correct,explanation&order=id.asc`,
+      {
+        headers: {
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+          Range: `${from}-${from + pageSize - 1}`,
+        },
+      }
+    );
+    if (!res.ok) throw new Error("Supabase questions fetch failed: " + res.status);
+    const page = await res.json();
+    all = all.concat(page);
+    if (page.length < pageSize) break;
+    from += pageSize;
+  }
+  const currentVersion = Number((await env.MCQ_BANK.get("version")) || "1");
+  const nextVersion = currentVersion + 1;
+  await env.MCQ_BANK.put("bank", JSON.stringify(all));
+  await env.MCQ_BANK.put("version", String(nextVersion));
+  return { count: all.length, version: nextVersion };
+}
 
 async function refreshLeaderboard(env) {
   // Added `course` to the select list so the app can filter the leaderboard
@@ -96,6 +138,20 @@ export default {
       return new Response(JSON.stringify({ ok: true, version: nextVersion }), {
         headers: { "Content-Type": "application/json", ...cors },
       });
+    }
+
+    if (url.pathname === "/bank/refresh" && request.method === "GET") {
+      try {
+        const result = await refreshBank(env);
+        return new Response(JSON.stringify({ ok: true, ...result }), {
+          headers: { "Content-Type": "application/json", ...cors },
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ ok: false, error: String(e) }), {
+          status: 500,
+          headers: { "Content-Type": "application/json", ...cors },
+        });
+      }
     }
 
     if (url.pathname === "/leaderboard" && request.method === "GET") {
@@ -177,5 +233,6 @@ export default {
 
   async scheduled(event, env, ctx) {
     ctx.waitUntil(refreshLeaderboard(env));
+    ctx.waitUntil(refreshBank(env));
   },
 };
