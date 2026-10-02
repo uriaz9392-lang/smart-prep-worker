@@ -1,3 +1,7 @@
 name = "smart-prep-bank"
 main = "worker.js"
 compatibility_date = "2024-01-01"
+
+[[kv_namespaces]]
+binding = "MCQ_BANK"
+id = "23f6b773325241ca86f5caa00b4fcea9"
